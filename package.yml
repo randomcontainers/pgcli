@@ -1,0 +1,189 @@
+name: pgcli
+title: pgcli
+summary: Queries PostgreSQL databases with auto-completion and syntax highlighting, interactively or with SQL given on the command line or in a file.
+homepage: https://www.pgcli.com/
+# pgcli, the Python packages installed with it, and pip and the packages it
+# vendors. psycopg is under LGPL-3.0-only, and its license files get the text
+# of the GPL, version 3, from licenses/, since the LGPL is written as a set of
+# permissions added to it. wcwidth's license also has Markus Kuhn's notice for
+# the wcwidth.c it derives from (HPND-Markus-Kuhn), and its width tables are
+# generated from the Unicode Character Database (Unicode-3.0). setproctitle's
+# C extension has code from PostgreSQL (PostgreSQL) and OpenBSD (ISC), whose
+# notices are in licenses/, as is the BSD-3-Clause text of pgspecial, whose
+# wheel has no license file.
+license: BSD-3-Clause AND BSD-2-Clause AND MIT AND HPND-Markus-Kuhn AND Unicode-3.0 AND PostgreSQL AND LGPL-3.0-only AND Apache-2.0 AND ISC AND MPL-2.0 AND PSF-2.0
+upstream:
+  source: pypi
+  project: pgcli
+  tag-pattern: '^(\d+\.\d+\.\d+)$'
+  version-template: '{1}'
+  versioning: semver
+  version: 4.7.1
+  cooldown: 24h
+  publisher: dbcli/pgcli
+image:
+  entrypoint: [pgcli]
+  cmd: [--help]
+  # pgcli keeps its config, history and log in ~/.config/pgcli/, and libpq
+  # reads ~/.pgpass, ~/.pg_service.conf and ~/.postgresql/. /cache is
+  # writable for any user.
+  env:
+    HOME: /cache
+    PYTHONUNBUFFERED: "1"
+test:
+  - |
+    test "$HOME" = /cache || { echo "HOME is $HOME, expected /cache" >&2; exit 1; }
+    pgcli --version > version.txt
+    if [ "$(cat version.txt)" != "Version: $VERSION" ]; then
+      echo "expected: Version: $VERSION" >&2; echo "got: $(cat version.txt)" >&2; exit 1
+    fi
+    pgcli --help > help.txt
+    grep -q '^Usage: pgcli \[OPTIONS\]' help.txt || { cat help.txt >&2; exit 1; }
+  - |
+    # psycopg's pure Python implementation loads libpq when it is imported, so
+    # a missing libpq shows up only at run time. sslrootcert=system needs
+    # libpq 16 or later.
+    /usr/local/lib/pgcli/bin/python - > libpq.txt <<'EOF'
+    from psycopg import pq
+    print(pq.__impl__, pq.version())
+    assert pq.__impl__ == "python", pq.__impl__
+    assert pq.version() >= 160000, pq.version()
+    EOF
+  - |
+    # No server runs in the container, so every connection fails in libpq.
+    # pgcli writes its config and log under $HOME before it connects. A user
+    # is always given: the test UID may have no account in the image, and
+    # pgcli then has no user name to fall back on.
+    expected='connection to server at "127.0.0.1", port 9 failed: Connection refused'
+    fails() {
+      rc=0
+      "$@" > out.txt 2> err.txt || rc=$?
+      if [ "$rc" != 1 ] || ! grep -Fq "$expected" err.txt; then
+        echo "$*: expected exit status 1 and: $expected" >&2; echo "got ($rc):" >&2; cat out.txt err.txt >&2; exit 1
+      fi
+    }
+    printf 'SELECT 1;\n' > query.sql
+    fails pgcli -h 127.0.0.1 -p 9 -U test -w -c 'SELECT 1' test
+    fails pgcli -w -f query.sql postgresql://test@127.0.0.1:9/test
+    fails pgcli -U test -w -c 'SELECT 1' 'host=127.0.0.1 port=9 user=test dbname=test sslmode=require'
+    test -s "$HOME/.config/pgcli/config" || { echo "pgcli wrote no $HOME/.config/pgcli/config" >&2; exit 1; }
+    test -f "$HOME/.config/pgcli/log" || { echo "pgcli wrote no $HOME/.config/pgcli/log" >&2; exit 1; }
+  - |
+    # Connections named by an alias in a pgclirc file and by a service in
+    # ~/.pg_service.conf.
+    printf '%s\n' '[alias_dsn]' 'local = postgresql://test@127.0.0.1:9/test' > pgclirc
+    pgcli --pgclirc pgclirc --list-dsn > dsn.txt
+    printf '%s\n' 'local : postgresql://test@127.0.0.1:9/test' > dsn.expected
+    if ! cmp -s dsn.expected dsn.txt; then
+      echo "expected:" >&2; cat dsn.expected >&2; echo "got:" >&2; cat dsn.txt >&2; exit 1
+    fi
+    printf '%s\n' '[demo]' 'host=127.0.0.1' 'port=9' 'user=test' 'dbname=test' > "$HOME/.pg_service.conf"
+    expected='connection to server at "127.0.0.1", port 9 failed: Connection refused'
+    fails() {
+      rc=0
+      "$@" > out.txt 2> err.txt || rc=$?
+      if [ "$rc" != 1 ] || ! grep -Fq "$expected" err.txt; then
+        echo "$*: expected exit status 1 and: $expected" >&2; echo "got ($rc):" >&2; cat out.txt err.txt >&2; exit 1
+      fi
+    }
+    fails pgcli --pgclirc pgclirc -D local -w -c 'SELECT 1'
+    fails pgcli -w -c 'SELECT 1' service=demo
+  - |
+    # The completer with pgspecial's backslash commands, the table formatter
+    # with wide characters, which tabulate measures with wcwidth's C
+    # extension, setproctitle and the time zone data, all without a server.
+    TZ=Europe/Berlin /usr/local/lib/pgcli/bin/python - > internals.txt <<'EOF'
+    import datetime
+    import zoneinfo
+
+    import setproctitle
+    import tzlocal
+    import wcwidth
+    import wcwidth._wcwidth_c
+    from pgspecial.main import PGSpecial
+    from prompt_toolkit.document import Document
+
+    from pgcli.main import OutputSettings, format_output
+    from pgcli.pgcompleter import PGCompleter
+
+    completer = PGCompleter(smart_completion=True, pgspecial=PGSpecial())
+
+
+    def words(text):
+        return [c.text for c in completer.get_completions(Document(text), None)]
+
+
+    assert "SELECT" in [w.upper() for w in words("SEL")], words("SEL")
+    assert "\\dt" in words("\\d"), words("\\d")
+
+    settings = OutputSettings(table_format="psql")
+    lines = list(format_output("Items", [[1, None, "日本"]], ["id", "note", "name"], "SELECT 1", settings))
+    assert lines[0] == "Items" and lines[-1] == "SELECT 1", lines
+    table = lines[1:-1]
+    assert len(table) == 5, lines
+    assert len({wcwidth.wcswidth(line) for line in table}) == 1, table
+    assert "<null>" in table[3] and "日本" in table[3], table
+    print("\n".join(lines))
+
+    setproctitle.setproctitle("pgcli test")
+    assert setproctitle.getproctitle() == "pgcli test", setproctitle.getproctitle()
+
+    assert tzlocal.get_localzone_name() == "Europe/Berlin", tzlocal.get_localzone_name()
+    winter = datetime.datetime(2026, 1, 15, 12, tzinfo=zoneinfo.ZoneInfo("Europe/Berlin"))
+    assert winter.utcoffset() == datetime.timedelta(hours=1), winter.utcoffset()
+    EOF
+examples:
+  - title: Open pgcli on a database
+    command: docker run --rm -it ghcr.io/randomcontainers/pgcli postgresql://app@db.example.com/shop
+  - title: Run the SQL in a file in the current directory and exit
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -e PGPASSWORD ghcr.io/randomcontainers/pgcli -h db.example.com -U app -f report.sql shop
+  - title: Keep the config and history in a volume, and show times in your time zone
+    command: docker run --rm -it --user "$(id -u):$(id -g)" -v pgcli-home:/cache -e TZ=Europe/Berlin ghcr.io/randomcontainers/pgcli -h db.example.com -U app shop
+combos:
+  - with: [postgresql-client]
+    default: true
+    base: pgcli
+    summary: pgcli with the PostgreSQL client tools, so psql, pg_dump and pg_restore are in the same image.
+    test:
+      - |
+        # Both members ship libpq.so.5: the distro's, which psycopg uses in the
+        # slim image, and postgresql-client's in /usr/local/lib, which psql
+        # finds through its RUNPATH. psycopg asks the dynamic loader for
+        # libpq.so.5, which takes the first of the two in its search order.
+        # Check that psycopg loads exactly one of them and that it reports the
+        # version in that file's name, libpq.so.5.<major>.
+        /usr/local/lib/pgcli/bin/python - > libpq.txt <<'EOF'
+        import os
+        from psycopg import pq
+
+        maps = sorted({line.split()[-1] for line in open("/proc/self/maps") if "/libpq.so" in line})
+        assert len(maps) == 1, maps
+        print(os.path.dirname(maps[0]), os.path.basename(maps[0]), pq.version() // 10000)
+        EOF
+        read -r dir file major < libpq.txt
+        case $dir in
+          /usr/local/lib)
+            client=$(cut -d. -f1 /usr/local/share/randomcontainers/postgresql-client/version)
+            if [ "$major" != "$client" ]; then
+              echo "psycopg loaded libpq $major from $dir, but postgresql-client is $client" >&2; exit 1
+            fi
+            ;;
+          /usr/lib | /usr/lib/*-linux-gnu) ;;
+          *) echo "psycopg loaded libpq from $dir" >&2; exit 1 ;;
+        esac
+        if [ "$file" != "libpq.so.5.$major" ]; then
+          echo "psycopg loaded $dir/$file but reports libpq $major" >&2; exit 1
+        fi
+      - |
+        # pgcli and psql read the same ~/.pg_service.conf.
+        printf '%s\n' '[demo]' 'host=127.0.0.1' 'port=9' 'user=test' 'dbname=test' > "$HOME/.pg_service.conf"
+        expected='connection to server at "127.0.0.1", port 9 failed: Connection refused'
+        fails() {
+          rc=0
+          "$@" > out.txt 2> err.txt || rc=$?
+          if [ "$rc" = 0 ] || ! grep -Fq "$expected" err.txt; then
+            echo "$*: expected an error with: $expected" >&2; echo "got ($rc):" >&2; cat out.txt err.txt >&2; exit 1
+          fi
+        }
+        fails pgcli -w -c 'SELECT 1' service=demo
+        fails psql -X -w -c 'SELECT 1' service=demo
