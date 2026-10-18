@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=ubuntu:26.04
+
+FROM ${BASE_IMAGE} AS build
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-venv \
+ && rm -rf /var/lib/apt/lists/*
+
+# pgcli imports psycopg when it starts, and psycopg needs libpq, which this
+# stage does not have, so the installed version is read from the package
+# metadata instead of `--version`. Two texts from licenses/ go next to the
+# license files of the wheels: the GPL, version 3, for psycopg, whose license
+# file is the LGPL, version 3, which is written as permissions added to the
+# GPL; and the Unicode License v3 for wcwidth, whose width tables are
+# generated from the Unicode Character Database.
+ARG VERSION
+RUN --mount=type=bind,target=/src \
+    set -eu; \
+    : "${VERSION:?}"; \
+    if ! awk -v want="pgcli==${VERSION}" '$1 == want { found = 1 } END { exit !found }' /src/requirements.lock; then \
+        echo "requirements.lock does not pin pgcli==${VERSION}" >&2; exit 1; \
+    fi; \
+    venv=/usr/local/lib/pgcli; \
+    meta=/usr/local/share/randomcontainers/pgcli; \
+    python3 -m venv "$venv"; \
+    "$venv/bin/pip" install --no-cache-dir --disable-pip-version-check --no-input \
+        --require-hashes --no-deps --only-binary=:all: \
+        --report /tmp/pip-report.json -r /src/requirements.lock; \
+    installed="$("$venv/bin/python" -c 'from importlib.metadata import version; print(version("pgcli"))')"; \
+    if [ "$installed" != "${VERSION}" ]; then \
+        echo "requirements.lock installs pgcli $installed, expected ${VERSION}" >&2; exit 1; \
+    fi; \
+    ln -s "$venv/bin/pgcli" /usr/local/bin/pgcli; \
+    mkdir -p "$meta"; \
+    printf '%s\n' "$VERSION" > "$meta/version"; \
+    cp /src/runtime-deps.ubuntu "$meta/runtime-deps"; \
+    "$venv/bin/python" /src/scripts/metadata.py /tmp/pip-report.json "$meta" /src/licenses; \
+    lgpl="$meta/licenses/psycopg/LICENSE.txt"; \
+    if ! grep -q 'GNU LESSER GENERAL PUBLIC LICENSE' "$lgpl" || ! grep -q 'Version 3, 29 June 2007' "$lgpl"; then \
+        echo "$lgpl is not version 3 of the LGPL" >&2; exit 1; \
+    fi; \
+    install -m 644 /src/licenses/GPL-3 "$meta/licenses/psycopg/GPL-3"; \
+    install -m 644 /src/licenses/Unicode-3.0 "$meta/licenses/wcwidth/Unicode-3.0"; \
+    rm /tmp/pip-report.json
+
+FROM ${BASE_IMAGE} AS slim
+ARG DEBIAN_FRONTEND=noninteractive
+RUN --mount=type=bind,source=runtime-deps.ubuntu,target=/tmp/runtime-deps \
+    set -eu; \
+    apt-get update; \
+    xargs apt-get install -y --no-install-recommends ca-certificates tini < /tmp/runtime-deps; \
+    rm -rf /var/lib/apt/lists/*; \
+    install -d -m 1777 /work /cache
+COPY --link --from=build /usr/local/ /usr/local/
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache HOME=/cache PYTHONUNBUFFERED=1
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "pgcli"]
+CMD ["--help"]
