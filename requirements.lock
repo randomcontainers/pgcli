@@ -4,9 +4,9 @@ cli-helpers==2.15.3 \
     --hash=sha256:1229eda553e378afe4b75ec3078b80489cb652d59e1437eb59fb0018b8121c7e \
     --hash=sha256:fde47d1495e49897acd3e084d93600dba5885a79073b89ead14c40d28c610c19
     # via pgcli
-click==8.5.0 \
-    --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360 \
-    --hash=sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34
+click==8.5.1 \
+    --hash=sha256:8bb5376d2006950386f8c6427613334a2acadc5f559cb80e638d00b4df957e37 \
+    --hash=sha256:9bbfada76703fd1d784b83eea012e3e8c6a001a876543ef104fa56aaaeb072b4
     # via
     #   pgcli
     #   pgspecial
