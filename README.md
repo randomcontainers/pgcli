@@ -161,7 +161,16 @@ gh attestation verify oci://ghcr.io/randomcontainers/pgcli:latest \
   --repo randomcontainers/pgcli --signer-repo randomcontainers/ci
 ```
 
-Images from `ghcr.io/randomcontainers/pgcli-postgresql-client` are built in that repository, so verify them with `--repo randomcontainers/pgcli-postgresql-client` and the same `--signer-repo`.
+Images published since November 2026 also have a keyless cosign signature from the same workflow, for admission controllers that check cosign signatures. Tags last built before then have only the attestation.
+
+```sh
+cosign verify ghcr.io/randomcontainers/pgcli:latest \
+  --certificate-identity https://github.com/randomcontainers/ci/.github/workflows/build.yml@refs/tags/v1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-github-workflow-repository randomcontainers/pgcli
+```
+
+Images from `ghcr.io/randomcontainers/pgcli-postgresql-client` are built in [randomcontainers/pgcli-postgresql-client](https://github.com/randomcontainers/pgcli-postgresql-client), so use `randomcontainers/pgcli-postgresql-client` in `--repo` and `--certificate-github-workflow-repository`.
 
 Each platform image also carries an SPDX SBOM that lists the distro and Python packages in it with their versions:
 
